@@ -1,0 +1,189 @@
+# 09 - GitLab CI/CD
+# GitLab CI/CD is configured via a .gitlab-ci.yml file in the repo root.
+# It is more powerful than GitHub Actions out of the box (environments, rules, caches).
+#
+# Key concepts:
+#   Pipeline  — the full set of jobs triggered by an event
+#   Stage     — a group of jobs that run in parallel
+#   Job       — a single unit of work (script + configuration)
+#   Runner    — the agent that executes jobs (shared or self-hosted)
+#   Artifact  — files a job produces that can be downloaded or passed to later jobs
+#   Cache     — files shared between pipeline runs (speeds up installs)
+
+# =========================================================
+# STAGES — define the order stages run in
+# =========================================================
+stages:
+  - lint
+  - test
+  - build
+  - deploy
+
+
+# =========================================================
+# GLOBAL DEFAULTS — applied to all jobs unless overridden
+# =========================================================
+default:
+  image: python:3.11-slim       # Docker image to run jobs in
+  before_script:
+    - pip install --upgrade pip
+
+
+# =========================================================
+# VARIABLES — available in all jobs
+# =========================================================
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  DOCKER_IMAGE:  "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+
+
+# =========================================================
+# CACHE — avoid re-downloading dependencies on every run
+# =========================================================
+.python-cache: &python-cache
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cache/pip
+      - venv/
+
+
+# =========================================================
+# STAGE: lint
+# =========================================================
+ruff-lint:
+  stage: lint
+  <<: *python-cache
+  script:
+    - pip install ruff
+    - ruff check .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+
+# =========================================================
+# STAGE: test
+# =========================================================
+pytest:
+  stage: test
+  <<: *python-cache
+  script:
+    - pip install -r requirements.txt pytest pytest-cov
+    - pytest tests/ -v --cov=src --cov-report=xml
+  coverage: '/TOTAL.*\s+(\d+%)$/'   # parse coverage from output
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+      junit: test-results.xml
+    expire_in: 1 week
+
+test-cpp:
+  stage: test
+  image: gcc:13
+  before_script: []               # override global before_script
+  script:
+    - g++ main.cpp -o app -std=c++17 -Wall -Werror
+    - ./app
+
+
+# =========================================================
+# STAGE: build
+# =========================================================
+build-docker:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind              # Docker-in-Docker
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker build -t $DOCKER_IMAGE .
+    - docker push $DOCKER_IMAGE
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+
+# =========================================================
+# STAGE: deploy
+# =========================================================
+deploy-staging:
+  stage: deploy
+  environment:
+    name: staging
+    url: https://staging.myapp.com
+  script:
+    - echo "Deploying $DOCKER_IMAGE to staging..."
+    - ssh deploy@staging.myapp.com "docker pull $DOCKER_IMAGE && docker-compose up -d"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+
+deploy-production:
+  stage: deploy
+  environment:
+    name: production
+    url: https://myapp.com
+  script:
+    - echo "Deploying $DOCKER_IMAGE to production..."
+    - ssh deploy@prod.myapp.com "docker pull $DOCKER_IMAGE && docker-compose up -d"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  when: manual              # requires a human to click "Deploy" in GitLab UI
+
+
+# =========================================================
+# SCHEDULED / NIGHTLY JOB
+# =========================================================
+nightly-tests:
+  stage: test
+  script:
+    - pip install -r requirements.txt pytest
+    - pytest tests/ --run-slow    # run the full slow test suite
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+
+# =========================================================
+# USEFUL PREDEFINED VARIABLES
+# =========================================================
+# $CI_COMMIT_SHA            — full commit hash
+# $CI_COMMIT_SHORT_SHA      — short (8 char) commit hash
+# $CI_COMMIT_BRANCH         — branch name
+# $CI_COMMIT_TAG            — tag name (if triggered by a tag)
+# $CI_COMMIT_MESSAGE        — commit message
+# $CI_PROJECT_NAME          — project name
+# $CI_PROJECT_DIR           — path to cloned repo on runner
+# $CI_REGISTRY              — GitLab container registry URL
+# $CI_REGISTRY_IMAGE        — full image path for this project
+# $CI_PIPELINE_SOURCE       — "push", "merge_request_event", "schedule", etc.
+# $CI_MERGE_REQUEST_IID     — MR number (only in MR pipelines)
+# $GITLAB_USER_LOGIN        — who triggered the pipeline
+
+
+# =========================================================
+# RULES — control when jobs run
+# =========================================================
+# Run only on main branch:
+#   rules:
+#     - if: $CI_COMMIT_BRANCH == "main"
+#
+# Run only on MRs:
+#   rules:
+#     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+#
+# Run on tag push:
+#   rules:
+#     - if: $CI_COMMIT_TAG
+#
+# Never run (disable a job without deleting it):
+#   rules:
+#     - when: never
+#
+# Always run:
+#   rules:
+#     - when: always

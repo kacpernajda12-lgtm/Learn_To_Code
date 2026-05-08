@@ -1,0 +1,181 @@
+# 08 - GitHub Actions
+# GitHub Actions runs automated workflows triggered by events (push, PR, schedule).
+# Place this file at: .github/workflows/ci.yml in your repository.
+#
+# Key concepts:
+#   Workflow  — a YAML file in .github/workflows/
+#   Event     — what triggers the workflow (push, pull_request, schedule, etc.)
+#   Job       — a group of steps that run on the same machine
+#   Step      — a single command or action
+#   Action    — reusable unit (from marketplace or your own)
+#   Runner    — the virtual machine that runs the job
+
+name: CI Pipeline
+
+# =========================================================
+# TRIGGERS — when does this workflow run?
+# =========================================================
+on:
+  push:
+    branches: [main, develop]         # run on push to these branches
+  pull_request:
+    branches: [main]                  # run when a PR targets main
+  schedule:
+    - cron: "0 6 * * 1"              # every Monday at 06:00 UTC
+  workflow_dispatch:                  # allow manual trigger from GitHub UI
+
+# =========================================================
+# ENVIRONMENT VARIABLES available to all jobs
+# =========================================================
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION:   "20"
+
+# =========================================================
+# JOBS
+# =========================================================
+jobs:
+
+  # ---------------------------------------------------------
+  # JOB 1: Lint and test Python code
+  # ---------------------------------------------------------
+  test-python:
+    name: Test Python
+    runs-on: ubuntu-latest            # ubuntu-latest | windows-latest | macos-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]   # run on multiple versions
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4     # clone the repo into the runner
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip                  # cache pip downloads for speed
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest ruff
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+      - name: Upload test results
+        if: always()                  # run even if tests fail
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: test-results.xml
+
+
+  # ---------------------------------------------------------
+  # JOB 2: Build and test C++ code
+  # ---------------------------------------------------------
+  test-cpp:
+    name: Test C++
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: sudo apt-get install -y g++
+
+      - name: Compile
+        run: g++ main.cpp -o app -std=c++17 -Wall -Werror
+
+      - name: Run
+        run: ./app
+
+
+  # ---------------------------------------------------------
+  # JOB 3: Deploy — only runs after test jobs pass, only on main
+  # ---------------------------------------------------------
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [test-python, test-cpp]    # wait for these jobs to succeed
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    environment:
+      name: production
+      url: https://myapp.example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy
+        run: echo "Deploying to production..."
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}    # stored in GitHub Secrets
+
+      - name: Notify Slack
+        if: success()
+        run: |
+          curl -X POST "${{ secrets.SLACK_WEBHOOK }}" \
+            -d '{"text": "Deployed ${{ github.sha }} to production"}'
+
+
+  # ---------------------------------------------------------
+  # JOB 4: Docker build and push to GitHub Container Registry
+  # ---------------------------------------------------------
+  docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test-python
+    if: github.event_name == 'push'
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # auto-provided by GitHub
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+
+
+# =========================================================
+# COMMONLY USED ACTIONS (from marketplace)
+# =========================================================
+# actions/checkout@v4           — clone your repo
+# actions/setup-python@v5       — install Python
+# actions/setup-node@v4         — install Node.js
+# actions/cache@v4              — cache files between runs
+# actions/upload-artifact@v4    — save files from a run
+# actions/download-artifact@v4  — retrieve saved files
+# docker/build-push-action@v5   — build and push Docker images
+# aws-actions/configure-aws-credentials@v4  — set up AWS auth
+
+
+# =========================================================
+# USEFUL CONTEXT VARIABLES
+# =========================================================
+# ${{ github.sha }}             — commit hash
+# ${{ github.ref }}             — branch/tag ref
+# ${{ github.actor }}           — who triggered the run
+# ${{ github.repository }}      — "owner/repo"
+# ${{ github.event_name }}      — "push", "pull_request", etc.
+# ${{ secrets.MY_SECRET }}      — from repo/org secrets
+# ${{ env.MY_VAR }}             — from the env: block above
+# ${{ matrix.python-version }}  — current matrix value
